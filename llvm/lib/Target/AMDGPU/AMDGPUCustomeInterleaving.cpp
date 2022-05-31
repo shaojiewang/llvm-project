@@ -11,6 +11,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include <unordered_map>
+
 #include "AMDGPUCustomeInterleaving.h"
 #include "MCTargetDesc/AMDGPUMCTargetDesc.h"
 #include "SIInstrInfo.h"
@@ -96,6 +98,58 @@ void dumpTRI(const TargetRegisterInfo *TRI){
 }
 #endif
 
+static bool isDSRead(const SUnit &SU) {
+  MachineInstr *MI = SU.getInstr();
+  return (SIInstrInfo::isDS(*MI) && (MI->mayLoad()));
+}
+
+static bool isDSWrite(const SUnit &SU) {
+  MachineInstr *MI = SU.getInstr();
+  return (SIInstrInfo::isDS(*MI) && (MI->mayStore()));
+}
+
+static bool isMFMA(const SUnit &SU) {
+  return SIInstrInfo::isMAI(*SU.getInstr());
+}
+
+static bool isVMEMLoad(const SUnit &SU) {
+  MachineInstr *MI = SU.getInstr();
+  return (SIInstrInfo::isVMEM(*MI) && (MI->mayLoad()));
+}
+
+static bool isVMEMStore(const SUnit &SU) {
+  MachineInstr *MI = SU.getInstr();
+  return (SIInstrInfo::isVMEM(*MI) && (MI->mayStore()));
+}
+
+static bool isVMUL(const SUnit &SU) {
+  const MachineInstr *MI = SU.getInstr();
+  if (MI->getOpcode() == AMDGPU::V_MUL_LO_I32_e64 
+      || MI->getOpcode() == AMDGPU::V_MUL_HI_I32_e64
+      || MI->getOpcode() == AMDGPU::V_MUL_LO_U32_e64 
+      || MI->getOpcode() == AMDGPU::V_MUL_HI_U32_e64) {
+    return true;
+  }
+  else{
+    return false;
+  }
+}
+
+static bool isSBarrier(const SUnit &SU) {
+  StringRef inline_str = SU.getInstr()->getOperand(0).getSymbolName();
+  StringRef s_barrier_str = "s_barrier";
+  size_t res_pos = inline_str.find(s_barrier_str);
+  if(res_pos != StringRef::npos)
+  {
+    //llvm::errs() << inline_str << "\n";
+    return true;
+  }
+  else
+  {
+    return false;
+  }
+}
+
 bool checkInstType(const SUnit SU, int check_type)
 {
   bool res = false;
@@ -126,49 +180,126 @@ void CustomInterleaving::apply(ScheduleDAGInstrs *DAG) {
     llvm::errs() << "==========\n";
   }
 
-  int count_ds_read = 0;
-  int count_ds_write = 0;
-  int count_buffer_load = 0;
-  int count_mfma = 0;
-  for(const auto SU : DAG->SUnits)
-  {
-    if(checkInstType(SU, AMDGPU::DS_READ2_B64_gfx9))
-    {
-      count_ds_read++;
-    }
-    if(checkInstType(SU, AMDGPU::V_MFMA_F32_32X32X8F16_mac_e64))
-    {
-      count_mfma++;
-    }
-    if(checkInstType(SU, AMDGPU::DS_WRITE2_B64_gfx9))
-    {
-      count_ds_write++;
-    }
-    if(checkInstType(SU, AMDGPU::BUFFER_LOAD_DWORDX4_OFFEN))
-    {
-      count_buffer_load++;
-    }
-    if(checkInstType(SU, AMDGPU::INLINEASM))
-    {
-      //llvm::errs() << SU.getInstr()->getOperand(0).getSymbolName() << "\n";
-      StringRef inline_str = SU.getInstr()->getOperand(0).getSymbolName();
-      StringRef s_barrier_str = "s_barrier";
-      size_t res_pos = inline_str.find(s_barrier_str);
-      if(res_pos != StringRef::npos)
-      {
-        llvm::errs() << inline_str << "\n";
-      }
+  int DSReadCount = 0;
+  int DSWriteCount = 0;
+  int VMEMLoadCount = 0;
+  int MFMACount = 0;
+  int VMULCount = 0;
+  int SBarrierCount = 0;
+  int VMEMStoreCount = 0;
+  int OthersCount = 0;
 
+  SmallVector<SUnit*, 16> DSReads;
+  SmallVector<SUnit*, 8> DSWrites;
+  SmallVector<SUnit*, 8> VMEMLoads;
+  SmallVector<SUnit*, 8> VMEMStores;
+  SmallVector<SUnit*, 30> VMULValus;
+  SmallVector<SUnit*, 8> SBarriers;
+  SmallVector<SUnit*, 100> Others;
+  SmallVector<SUnit*, 64> MFMAs;
+  SmallVector<SUnit*, 200> InstructionToInterLeave;
+
+  std::unordered_map<SUnit*, int> InstLatMap;
+
+  for(SUnit &SU : DAG->SUnits)
+  {
+    if (isDSRead(SU)) {
+      DSReadCount++;
+      DSReads.push_back(&SU);
+      InstructionToInterLeave.push_back(&SU);
+      InstLatMap.insert({&SU, 4});
+    } else if (isDSWrite(SU)) {
+      DSWriteCount++;
+      DSWrites.push_back(&SU);
+      InstructionToInterLeave.push_back(&SU);
+      InstLatMap.insert({&SU, 30});
+    } else if (isMFMA(SU)) {
+      MFMACount++;
+      MFMAs.push_back(&SU);
+    } else if (isVMEMLoad(SU)) {
+      VMEMLoadCount++;
+      VMEMLoads.push_back(&SU);
+      InstructionToInterLeave.push_back(&SU);
+      InstLatMap.insert({&SU, 30});
+    } else if (isVMEMStore(SU)) {
+      VMEMStoreCount++;
+      VMEMStores.push_back(&SU);
+      InstructionToInterLeave.push_back(&SU);
+      InstLatMap.insert({&SU, 30});
+    } else if (isVMUL(SU)) {
+      VMULCount++;
+      VMULValus.push_back(&SU);
+      InstructionToInterLeave.push_back(&SU);
+      InstLatMap.insert({&SU, 8});
+    } else if (isSBarrier(SU)) {
+      SBarrierCount++;
+      SBarriers.push_back(&SU);
+      InstructionToInterLeave.push_back(&SU);
+      InstLatMap.insert({&SU, 52});
+    } else {
+      OthersCount++;
+      Others.push_back(&SU);
+      InstructionToInterLeave.push_back(&SU);
+      InstLatMap.insert({&SU, 4});
     }
   }
 
-  llvm::errs() << "count_ds_read:" << count_ds_read << ",count_mfma:" << count_mfma << "\n";
+  llvm::errs() << "DSRead instruction count: " << DSReadCount << "\n";
+  llvm::errs() << "DSWrite instruction count: " << DSWriteCount << "\n";
+  llvm::errs() << "VMEMLoad instruction count: " << VMEMLoadCount << "\n";
+  llvm::errs() << "VMEMStore instruction count: " << VMEMStoreCount << "\n";
+  llvm::errs() << "MFMA instruction count: " << MFMACount << "\n";
+  llvm::errs() << "SBarrier instruction count: " << SBarrierCount << "\n";
+  llvm::errs() << "VMUL instruction count: " << VMULCount << "\n";
+  llvm::errs() << "Other instruction count: " << OthersCount << "\n";
 
-  //llvm::errs() << "Add some cluster edges.\n";
-  //DAG->addEdge(&DAG->SUnits[5], SDep(&DAG->SUnits[3], SDep::Cluster));
-  //DAG->addEdge(&DAG->SUnits[5], SDep(&DAG->SUnits[3], SDep::Artificial));
-  //DAG->addEdge(&DAG->SUnits[6], SDep(&DAG->SUnits[3], SDep::Cluster));
-  //DAG->addEdge(&DAG->SUnits[6], SDep(&DAG->SUnits[3], SDep::Artificial));
+  assert(VMEMStoreCount == 0);
+  assert(MFMACount > (VMEMLoadCount + DSWriteCount + DSReadCount));
+
+  int64_t MFMAIter = MFMAs.size() - 1;
+
+  int MFMALatShadow = 56;
+  int InstToInterleaveIter = InstructionToInterLeave.size() - 1;
+
+  for(int i_mfma = MFMAIter - 1; i_mfma > 0; i_mfma--)
+  {
+    MFMALatShadow = 56;
+    SUnit* MFMASU = MFMAs[i_mfma];
+    while(MFMALatShadow > 0 && InstToInterleaveIter > 0)
+    {
+      SUnit* InstBetweenMFMA = InstructionToInterLeave[InstToInterleaveIter--];
+      MFMALatShadow -= InstLatMap[InstBetweenMFMA];
+    }
+    InstToInterleaveIter++;
+    SUnit* InstMutation = InstructionToInterLeave[InstToInterleaveIter];
+    DAG->addEdge(MFMASU, SDep(InstMutation, SDep::Artificial));
+
+  }
+
+
+  //// Interleave MFMA with buffer_loads.
+  //int64_t VMEMLoadIter = VMEMLoads.size() - 1;
+  //while (VMEMLoadIter >= 0) {
+  //  SUnit* VMEMLoadSU = VMEMLoads[VMEMLoadIter--];
+  //  SUnit* MFMASU = MFMAs[MFMAIter--];
+  //  DAG->addEdge(MFMASU, SDep(VMEMLoadSU, SDep::Artificial));
+  //}
+
+  //// Interleave MFMA with ds_writes.
+  //int64_t DSWriteIter = DSWrites.size() - 1;
+  //while (DSWriteIter >= 0) {
+  //  SUnit* DSWriteSU = DSWrites[DSWriteIter--];
+  //  SUnit* MFMASU = MFMAs[MFMAIter--];
+  //  DAG->addEdge(MFMASU, SDep(DSWriteSU, SDep::Artificial));
+  //}
+
+  // Interleave MFMA with ds_reads.
+  //int64_t DSReadIter = DSReads.size() - 1;
+  //while (DSReadIter >= 0) {
+  //  SUnit* DSReadSU = DSReads[DSReadIter--];
+  //  SUnit* MFMASU = MFMAs[MFMAIter--];
+  //  DAG->addEdge(MFMASU, SDep(DSReadSU, SDep::Artificial));
+  //}
 
   //llvm::errs() << "After adding cluster edges.\n";
   //for (SUnit &SU : DAG->SUnits) {
