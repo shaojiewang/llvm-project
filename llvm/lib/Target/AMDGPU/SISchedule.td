@@ -76,7 +76,7 @@ class SISchedMachineModel : SchedMachineModel {
   // to the register pressure analysis.
   let MicroOpBufferSize = 1;
   let IssueWidth = 1;
-  let PostRAScheduler = 1;
+  let PostRAScheduler = 0;
 
   // FIXME:Approximate 2 * branch cost.  Try to hack around bad
   // early-ifcvt heuristics. These need improvement to avoid the OOE
