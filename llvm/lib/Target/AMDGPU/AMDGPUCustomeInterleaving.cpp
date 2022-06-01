@@ -32,6 +32,59 @@ static bool isDSRead(const SUnit &SU) {
   MachineInstr *MI = SU.getInstr();
   return (SIInstrInfo::isDS(*MI) && (MI->mayLoad()));
 }
+
+static bool isInlineAsm(const SUnit &SU) {
+  MachineInstr *MI = SU.getInstr();
+  return MI->isInlineAsm();
+}
+
+static bool isDSWrite(const SUnit &SU) {
+  MachineInstr *MI = SU.getInstr();
+  return (SIInstrInfo::isDS(*MI) && (MI->mayStore()));
+}
+
+static bool isMFMA(const SUnit &SU) {
+  return SIInstrInfo::isMAI(*SU.getInstr());
+}
+
+static bool isVMEMLoad(const SUnit &SU) {
+  MachineInstr *MI = SU.getInstr();
+  return (SIInstrInfo::isVMEM(*MI) && (MI->mayLoad()));
+}
+
+static bool isVMEMStore(const SUnit &SU) {
+  MachineInstr *MI = SU.getInstr();
+  return (SIInstrInfo::isVMEM(*MI) && (MI->mayStore()));
+}
+
+static bool isVMUL(const SUnit &SU) {
+  const MachineInstr *MI = SU.getInstr();
+  if (MI->getOpcode() == AMDGPU::V_MUL_LO_I32_e64 
+      || MI->getOpcode() == AMDGPU::V_MUL_HI_I32_e64
+      || MI->getOpcode() == AMDGPU::V_MUL_LO_U32_e64 
+      || MI->getOpcode() == AMDGPU::V_MUL_HI_U32_e64) {
+    return true;
+  }
+  else{
+    return false;
+  }
+}
+
+static bool isSBarrier(const SUnit &SU) {
+  StringRef inline_str = SU.getInstr()->getOperand(0).getSymbolName();
+  StringRef s_barrier_str = "s_barrier";
+  size_t res_pos = inline_str.find(s_barrier_str);
+  if(res_pos != StringRef::npos)
+  {
+    //llvm::errs() << inline_str << "\n";
+    return true;
+  }
+  else
+  {
+    return false;
+  }
+}
+
 // Try recognize a CONV hot loop.
 // The 0th SUnit would be an inline asm.
 // The last SUnit would be an S_CBRANCH_SCC1.
@@ -42,7 +95,7 @@ bool identifyGEMMHotLoop(ScheduleDAGInstrs *DAG) {
   const SUnit &SU = DAG->SUnits[0];
   if (SU.isInstr()) {
     const MachineInstr *MI = SU.getInstr();
-    if (isDSRead(SU)) {
+    if (isDSRead(SU) || isInlineAsm(SU) || isVMEMLoad(SU)) {
       llvm::errs() << "find ds read\n";
       gotBegin = true;
     }
@@ -102,54 +155,6 @@ void dumpTRI(const TargetRegisterInfo *TRI){
   }
 }
 #endif
-
-
-static bool isDSWrite(const SUnit &SU) {
-  MachineInstr *MI = SU.getInstr();
-  return (SIInstrInfo::isDS(*MI) && (MI->mayStore()));
-}
-
-static bool isMFMA(const SUnit &SU) {
-  return SIInstrInfo::isMAI(*SU.getInstr());
-}
-
-static bool isVMEMLoad(const SUnit &SU) {
-  MachineInstr *MI = SU.getInstr();
-  return (SIInstrInfo::isVMEM(*MI) && (MI->mayLoad()));
-}
-
-static bool isVMEMStore(const SUnit &SU) {
-  MachineInstr *MI = SU.getInstr();
-  return (SIInstrInfo::isVMEM(*MI) && (MI->mayStore()));
-}
-
-static bool isVMUL(const SUnit &SU) {
-  const MachineInstr *MI = SU.getInstr();
-  if (MI->getOpcode() == AMDGPU::V_MUL_LO_I32_e64 
-      || MI->getOpcode() == AMDGPU::V_MUL_HI_I32_e64
-      || MI->getOpcode() == AMDGPU::V_MUL_LO_U32_e64 
-      || MI->getOpcode() == AMDGPU::V_MUL_HI_U32_e64) {
-    return true;
-  }
-  else{
-    return false;
-  }
-}
-
-static bool isSBarrier(const SUnit &SU) {
-  StringRef inline_str = SU.getInstr()->getOperand(0).getSymbolName();
-  StringRef s_barrier_str = "s_barrier";
-  size_t res_pos = inline_str.find(s_barrier_str);
-  if(res_pos != StringRef::npos)
-  {
-    //llvm::errs() << inline_str << "\n";
-    return true;
-  }
-  else
-  {
-    return false;
-  }
-}
 
 bool checkInstType(const SUnit SU, int check_type)
 {
