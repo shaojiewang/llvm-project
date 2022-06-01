@@ -27,6 +27,11 @@ public:
   CustomInterleaving() {}
   void apply(ScheduleDAGInstrs *DAG) override;
 };
+
+static bool isDSRead(const SUnit &SU) {
+  MachineInstr *MI = SU.getInstr();
+  return (SIInstrInfo::isDS(*MI) && (MI->mayLoad()));
+}
 // Try recognize a CONV hot loop.
 // The 0th SUnit would be an inline asm.
 // The last SUnit would be an S_CBRANCH_SCC1.
@@ -37,7 +42,7 @@ bool identifyGEMMHotLoop(ScheduleDAGInstrs *DAG) {
   const SUnit &SU = DAG->SUnits[0];
   if (SU.isInstr()) {
     const MachineInstr *MI = SU.getInstr();
-    if (MI->getOpcode() == AMDGPU::DS_READ2_B64_gfx9) {
+    if (isDSRead(SU)) {
       llvm::errs() << "find ds read\n";
       gotBegin = true;
     }
@@ -98,10 +103,6 @@ void dumpTRI(const TargetRegisterInfo *TRI){
 }
 #endif
 
-static bool isDSRead(const SUnit &SU) {
-  MachineInstr *MI = SU.getInstr();
-  return (SIInstrInfo::isDS(*MI) && (MI->mayLoad()));
-}
 
 static bool isDSWrite(const SUnit &SU) {
   MachineInstr *MI = SU.getInstr();
@@ -235,7 +236,7 @@ void CustomInterleaving::apply(ScheduleDAGInstrs *DAG) {
       SBarrierCount++;
       SBarriers.push_back(&SU);
       InstructionToInterLeave.push_back(&SU);
-      InstLatMap.insert({&SU, 52});
+      InstLatMap.insert({&SU, 55});
     } else {
       OthersCount++;
       Others.push_back(&SU);
@@ -253,14 +254,15 @@ void CustomInterleaving::apply(ScheduleDAGInstrs *DAG) {
   llvm::errs() << "VMUL instruction count: " << VMULCount << "\n";
   llvm::errs() << "Other instruction count: " << OthersCount << "\n";
 
-  assert(VMEMStoreCount == 0);
-  assert(MFMACount > (VMEMLoadCount + DSWriteCount + DSReadCount));
+  //assert(VMEMStoreCount == 0);
+  assert(MFMACount * 56 > (VMEMLoadCount * 30 + DSWriteCount * 30 + DSReadCount * 4));
 
   int64_t MFMAIter = MFMAs.size() - 1;
 
   int MFMALatShadow = 56;
   int InstToInterleaveIter = InstructionToInterLeave.size() - 1;
 
+#if 0
   for(int i_mfma = MFMAIter - 1; i_mfma > 0; i_mfma--)
   {
     MFMALatShadow = 56;
@@ -269,43 +271,48 @@ void CustomInterleaving::apply(ScheduleDAGInstrs *DAG) {
     {
       SUnit* InstBetweenMFMA = InstructionToInterLeave[InstToInterleaveIter--];
       MFMALatShadow -= InstLatMap[InstBetweenMFMA];
+      printNodeName(*InstBetweenMFMA, DAG->EntrySU, DAG->ExitSU);
+      llvm::errs() << DAG->getGraphNodeLabel(InstBetweenMFMA) << "\n";
+      llvm::errs() << MFMALatShadow << "," << InstToInterleaveIter << "\n";
     }
     InstToInterleaveIter++;
     SUnit* InstMutation = InstructionToInterLeave[InstToInterleaveIter];
     DAG->addEdge(MFMASU, SDep(InstMutation, SDep::Artificial));
-
   }
 
+#else
 
-  //// Interleave MFMA with buffer_loads.
-  //int64_t VMEMLoadIter = VMEMLoads.size() - 1;
-  //while (VMEMLoadIter >= 0) {
-  //  SUnit* VMEMLoadSU = VMEMLoads[VMEMLoadIter--];
-  //  SUnit* MFMASU = MFMAs[MFMAIter--];
-  //  DAG->addEdge(MFMASU, SDep(VMEMLoadSU, SDep::Artificial));
-  //}
+  // Interleave MFMA with buffer_loads.
+  int64_t VMEMLoadIter = VMEMLoads.size() - 1;
+  while (VMEMLoadIter >= 0) {
+    SUnit* VMEMLoadSU = VMEMLoads[VMEMLoadIter--];
+    SUnit* MFMASU = MFMAs[MFMAIter--];
+    DAG->addEdge(MFMASU, SDep(VMEMLoadSU, SDep::Artificial));
+  }
 
-  //// Interleave MFMA with ds_writes.
-  //int64_t DSWriteIter = DSWrites.size() - 1;
-  //while (DSWriteIter >= 0) {
-  //  SUnit* DSWriteSU = DSWrites[DSWriteIter--];
-  //  SUnit* MFMASU = MFMAs[MFMAIter--];
-  //  DAG->addEdge(MFMASU, SDep(DSWriteSU, SDep::Artificial));
-  //}
+  // Interleave MFMA with ds_writes.
+  int64_t DSWriteIter = DSWrites.size() - 1;
+  while (DSWriteIter >= 0) {
+    SUnit* DSWriteSU = DSWrites[DSWriteIter--];
+    SUnit* MFMASU = MFMAs[MFMAIter--];
+    DAG->addEdge(MFMASU, SDep(DSWriteSU, SDep::Artificial));
+  }
 
   // Interleave MFMA with ds_reads.
-  //int64_t DSReadIter = DSReads.size() - 1;
-  //while (DSReadIter >= 0) {
-  //  SUnit* DSReadSU = DSReads[DSReadIter--];
-  //  SUnit* MFMASU = MFMAs[MFMAIter--];
-  //  DAG->addEdge(MFMASU, SDep(DSReadSU, SDep::Artificial));
-  //}
-
-  //llvm::errs() << "After adding cluster edges.\n";
-  //for (SUnit &SU : DAG->SUnits) {
-  //  DAG->dumpNodeAll(SU);
-  //  llvm::errs() << "==========\n";
-  //}
+  int64_t DSReadIter = DSReads.size() - 1;
+  while (DSReadIter >= 0) {
+    SUnit* DSReadSU = DSReads[DSReadIter--];
+    SUnit* MFMASU = MFMAs[MFMAIter--];
+    DAG->addEdge(MFMASU, SDep(DSReadSU, SDep::Artificial));
+  }
+#endif
+  // llvm::errs() << "After adding cluster edges.\n";
+  // for (const SUnit &SU : DAG->SUnits) {
+  //   //DAG->dumpNodeAll(SU);
+  //   printNodeName(SU, DAG->EntrySU, DAG->ExitSU);
+  //   llvm::errs() << DAG->getGraphNodeLabel(&SU);
+  //   llvm::errs() << "==========\n";
+  // }
 }
 
 } // end namespace
