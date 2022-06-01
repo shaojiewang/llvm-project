@@ -262,7 +262,7 @@ void CustomInterleaving::apply(ScheduleDAGInstrs *DAG) {
   int MFMALatShadow = 56;
   int InstToInterleaveIter = InstructionToInterLeave.size() - 1;
 
-#if 0
+#if 1
   int64_t MFMAIter = MFMAs.size() - 1;
   for(int i_mfma = MFMAIter - 1; i_mfma > 0; i_mfma--)
   {
