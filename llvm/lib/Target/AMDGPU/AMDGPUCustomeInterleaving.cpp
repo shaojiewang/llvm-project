@@ -257,12 +257,13 @@ void CustomInterleaving::apply(ScheduleDAGInstrs *DAG) {
   //assert(VMEMStoreCount == 0);
   assert(MFMACount * 56 > (VMEMLoadCount * 30 + DSWriteCount * 30 + DSReadCount * 4));
 
-  int64_t MFMAIter = MFMAs.size() - 1;
+  
 
   int MFMALatShadow = 56;
   int InstToInterleaveIter = InstructionToInterLeave.size() - 1;
 
 #if 0
+  int64_t MFMAIter = MFMAs.size() - 1;
   for(int i_mfma = MFMAIter - 1; i_mfma > 0; i_mfma--)
   {
     MFMALatShadow = 56;
